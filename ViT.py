@@ -4,7 +4,9 @@ import torch
 import torch.nn as nn
 import warnings
 import os,sys
-
+import numpy as np
+from tqdm import tqdm
+import torch.nn.functional as F
 get_path = os.path.dirname(os.path.abspath(__file__))
 sys.path.append(get_path)
 current_path = os.path.dirname(os.path.abspath(__file__)).split('/')
@@ -155,22 +157,45 @@ class PatchEmbed(nn.Module):
         return x
 
 
-class DiffusionVisionTransformer(nn.Module):
+class RBFExpansion(nn.Module):
+    r"""Expand distances between nodes by radial basis functions.
+
+    .. math::
+        \exp(- \gamma * ||d - \mu||^2)
+
+    """
+    def __init__(self, low=0., high=1., num_centers=265):
+        super(RBFExpansion, self).__init__()
+
+        # num_centers = int(np.ceil((high - low) / gap))
+        centers = np.linspace(low, high, num_centers).reshape(1,-1)
+        self.register_buffer('centers',torch.tensor(centers).float())
+        self.coef = num_centers / (low - high)
+        self.linear = nn.Linear(num_centers,num_centers)
+
+    def forward(self, values): 
+        #input shape [B]
+        radial = values[:,None] - self.centers
+        x =  torch.exp(self.coef * (radial ** 2))
+        x = self.linear(x)
+        return x
+
+class BFNVisionTransformer(nn.Module):
     """ Vision Transformer """
     def __init__(self, img_size=[64,64], patch_size=8, in_chans=3, embed_dim=256, depth=3,
                  num_heads=4, mlp_ratio=1., qkv_bias=True, qk_scale=None, drop_rate=0.1, attn_drop_rate=0.1,
-                 drop_path_rate=0.1, norm_layer=nn.LayerNorm,emb=PatchEmbed,total_steps = 2000, **kwargs):
+                 drop_path_rate=0.1, norm_layer=nn.LayerNorm,emb=PatchEmbed,sigma1 = 0.001, **kwargs):
         super().__init__()
         self.num_features = self.embed_dim = embed_dim
         self.patch_size = patch_size
         self.in_chans = in_chans
         self.img_size = img_size
-        self.total_steps = total_steps
+        self.sigma1 = sigma1
         self.patch_embed = emb(
             img_size=img_size, patch_size=patch_size, in_chans=in_chans, embed_dim=embed_dim)
         num_patches = self.patch_embed.num_patches
         self.cls_token = nn.Parameter(torch.zeros(1, 1, embed_dim))
-        self.time_embed = nn.Embedding(total_steps,embed_dim)
+        self.time_embed = RBFExpansion(num_centers=embed_dim)
         self.pos_embed = nn.Parameter(torch.zeros(1, num_patches + 1, embed_dim))
         self.pos_drop = nn.Dropout(p=drop_rate)
         dpr = [x.item() for x in torch.linspace(0, drop_path_rate, depth)]  # stochastic depth decay rule
@@ -183,7 +208,8 @@ class DiffusionVisionTransformer(nn.Module):
         self.head = nn.Linear(embed_dim, in_chans*patch_size**2)
         trunc_normal_(self.pos_embed, std=.02)
         trunc_normal_(self.cls_token, std=.02)
-        trunc_normal_(self.time_embed.weight, std=.02)
+        trunc_normal_(self.time_embed.linear.weight, std=.02)
+        nn.init.constant_(self.time_embed.linear.bias, 0)
         self.apply(self._init_weights)
 
     def _init_weights(self, m):
@@ -205,112 +231,55 @@ class DiffusionVisionTransformer(nn.Module):
         x = x + self.pos_embed + time_step
         return self.pos_drop(x)
 
-    def forward(self,x,t):
-        x = self.prepare_tokens(x,t)
+    def forward(self,x,t,gamma,CTS_out=True):
+        x1 = self.prepare_tokens(x,t)
         for i,blk in enumerate(self.blocks):
-            x = blk(x)
-        x = self.norm(x)
-        x = self.head(x)
-        img = x[:,1:,:]
+            x1 = blk(x1)
+        x1 = self.norm(x1)
+        x1 = self.head(x1)
+        img = x1[:,1:,:]
         img = img.view(-1,self.img_size[0]//self.patch_size,self.img_size[1]//self.patch_size,self.patch_size,self.patch_size,self.in_chans)
         img = img.permute(0, 5, 1, 3, 2, 4).contiguous()
         img = img.view(-1,self.in_chans,self.img_size[0],self.img_size[1])
+        if CTS_out:
+            gamma = gamma.view(-1,1,1,1)
+            img = x/gamma - torch.sqrt((1-gamma)/gamma)*img
+    
         return img
 
     @torch.no_grad()
-    def sampler(self,device,k=10,N=128):
-        import time
-        start_time = time.time()  
-        noisy_img = torch.normal(0,1,(N,3,self.img_size[0],self.img_size[1]))    
-        noisy_img = noisy_img.to(device)
-        for t in range(self.total_steps-1,0,-k):
-            steps = torch.tensor([t]*N,device = device).long()
-            denoised_img = self.forward(noisy_img,steps)
-            denoised_img = torch.clamp(denoised_img,-1,1)
-            #DDIM
-            alpha_tk = 1 - math.sqrt((t+1-k)/self.total_steps)#+1e-5
-            alpha_t = 1 - math.sqrt((t+1)/self.total_steps)+1e-5
-            noise = (noisy_img - math.sqrt(alpha_t)*denoised_img)/math.sqrt(1-alpha_t)
-            noisy_img = math.sqrt(alpha_tk)*(noisy_img/math.sqrt(alpha_t) + (math.sqrt((1-alpha_tk)/alpha_tk) - math.sqrt((1-alpha_t)/alpha_t))*noise)
-            print(f"\rnoise level {t}  {time.time()-start_time:.2f}",end='')
-        img = (denoised_img.cpu()+1)/2
+    def sampler(self,device,k=25,N=128):
+
+        alpha = self.sigma1**(-2/k)*(1-self.sigma1**(2/k))
+        y = torch.normal(0,1/alpha,(N,3,self.img_size[0],self.img_size[1]),device=device)
+        mu = alpha*y/(1+alpha)  
+        rho = 1+alpha
+        pred = torch.zeros((N,3,self.img_size[0],self.img_size[1]),device=device)    
+        for i in tqdm(range(2,k,1)):
+            t = (i-1)/k*torch.ones(N,device=device)
+            pred = self.forward(pred,t,1-self.sigma1**(2*t))
+            alpha = self.sigma1**(-2*i/k)*(1-self.sigma1**(2/k))
+            y = torch.normal(0,1/alpha,(N,3,self.img_size[0],self.img_size[1]),device=device)+pred
+            mu = (rho*mu+alpha*y)/(rho+alpha)
+            rho = rho+alpha
+
+        pred = self.forward(pred,1,1-self.sigma1**2)    
+        img = (pred.cpu()+1)/2
         return img
 
-    def diffusion_sequence(self,device,k=100,N=5):
-        import time
-        start_time = time.time()
-        noisy_img = torch.normal(0,1,(N,3,self.img_size[0],self.img_size[1]))    
-        noisy_img = noisy_img.to(device)
-        img = [(noisy_img.cpu()+1)/2]
-        for t in range(self.total_steps-1,0,-k):
-            steps = torch.tensor([t]*N,device = device).long()
-            denoised_img = self.forward(noisy_img,steps)
-            denoised_img = torch.clamp(denoised_img,-1,1)
-            #DDIM
-            alpha_tk = 1 - math.sqrt((t+1-k)/self.total_steps)#+1e-5
-            alpha_t = 1 - math.sqrt((t+1)/self.total_steps)+1e-5
-            noise = (noisy_img - math.sqrt(alpha_t)*denoised_img)/math.sqrt(1-alpha_t)
-            noisy_img = math.sqrt(alpha_tk)*(noisy_img/math.sqrt(alpha_t) + (math.sqrt((1-alpha_tk)/alpha_tk) - math.sqrt((1-alpha_t)/alpha_t))*noise)
-            img.append((denoised_img.cpu()+1)/2)
-            print(f"\rnoise level {t}  {time.time()-start_time:.2f}",end='')
-        return img
-            
-import click
 
-@click.command()
-@click.option("--sample_n", default=256, help="Number of samples you'll get.")
-@click.option("--acc_k", default=1, help="Number of step jumped during sampling.")
-def main(sample_n, acc_k):
-    """main entrance
-    Arguments:
-    ---------
-    sample_n : 128
-    step_k : 10
-    """
-    import matplotlib.pyplot as plt
-    from mpl_toolkits.axes_grid1 import ImageGrid
-    import torchvision.transforms.functional as transF
-    device = torch.device('cuda')
-    # model = DiffusionVisionTransformer(img_size=[64,64],total_steps=2000,patch_size=8,embed_dim=384,depth=7,num_heads=12) #miniImageNet
-    # state = torch.load(get_path+"/Saved_Models/miniImageNet.pkl")
+def BFNLoss(img,pred,t,sigma1=0.001):
+    loss =torch.mean(-math.log(sigma1)*sigma1**(-2*t)*((img-pred)**2).mean(dim=(-1,-2,-3)))
+    return loss
 
-    model = DiffusionVisionTransformer(img_size=[64,64],total_steps=2000,patch_size=4,embed_dim=256,depth=6,num_heads=4) #oxford flower
-    state = torch.load(get_path+"/Saved_Models/OxfordFlower.pkl")
-   
-    model.load_state_dict(state,strict=True)
-    model.to(device)
+if __name__ == '__main__':
+    from bfn_loader import BFNDataset
+    from torch.utils.data import DataLoader
+    dataset = BFNDataset("/drug/OxfordFlowers/train",[64,64],sigma1=0.001)
+    dataloader = DataLoader(dataset,batch_size=4)
+    noisy_img,img,t,gamma = next(iter(dataloader))
+    t = t.float()
+    gamma = gamma.float()
+    model = BFNVisionTransformer()
+    out = model(noisy_img,t,gamma)
     
-    N = 6
-    img = model.diffusion_sequence(device,100,N=N)
-    fig = plt.figure(figsize=(len(img),1.5*N),dpi=300)
-    grid = ImageGrid(fig, 111,  # similar to subplot(111)
-                    nrows_ncols=(N, len(img)),  # creates 2x2 grid of axes
-                    axes_pad=0.1,  # pad between axes in inch.
-                    )
-    img = torch.stack(img,dim=0).transpose(0,1).flatten(0,1)
-    for ax, im in zip(grid,img):
-        # Iterating over the grid returns the Axes.
-        ax.imshow(transF.to_pil_image(im))
-    plt.savefig(get_next_path(get_path+"/Saved_Models/denoise_sequence.png"),bbox_inches='tight')
-
-    img = model.sampler(device,acc_k,sample_n)
-    fig = plt.figure(figsize=(16., 16.))
-    grid = ImageGrid(fig, 111,  # similar to subplot(111)
-                    nrows_ncols=(16, 16),  # creates 2x2 grid of axes
-                    axes_pad=0.1,  # pad between axes in inch.
-                    )
-    for ax, im in zip(grid,img):
-        # Iterating over the grid returns the Axes.
-        ax.imshow(transF.to_pil_image(im))
-    plt.savefig(get_next_path(get_path+"/Saved_Models/samples.png"),bbox_inches='tight')
-
-def get_next_path(pth):
-    prefix_path, ext = os.path.splitext(pth)
-    i = 1
-    file_path = pth
-    while os.path.isfile(file_path):
-        file_path = f"{prefix_path}_{str(i)}{ext}"
-    return file_path
-        
-if __name__ == "__main__":
-    main()

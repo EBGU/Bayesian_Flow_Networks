@@ -1,8 +1,8 @@
 import os,sys
 get_path = os.path.dirname(os.path.abspath(__file__))
 sys.path.append(get_path)
-from diffusion_loader import DiffusionDataset
-from ViT import DiffusionVisionTransformer
+from bfn_loader import BFNDataset
+from ViT import BFNLoss,BFNVisionTransformer
 import numpy as np
 import torch
 import torch.distributed as dist
@@ -27,18 +27,19 @@ def init_process_group(world_size, rank):
         world_size=world_size,
         rank=rank)
 
-def evaluate(model, dataloader, device):
+def evaluate(model,sigma1, dataloader, device):
     model.eval()
     datagenerator = iter(dataloader)
     loss_arr = []
     for _ in range(len(dataloader)):
-        noisy_img,img,t = next(datagenerator)
+        noisy_img,img,t,gamma = next(datagenerator)
         noisy_img = noisy_img.to(device)
         img = img.to(device)
-        t = t.to(device)
+        t = t.float().to(device)
+        gamma = gamma.float().to(device)
         with torch.no_grad():
-            denoised_img = model(noisy_img,t)
-            loss = F.smooth_l1_loss(denoised_img,img)
+            denoised_img = model(noisy_img,t,gamma)
+            loss = BFNLoss(img,denoised_img,t,sigma1)
         loss_arr.append(loss.item())
     return np.array(loss_arr).mean()
 
@@ -46,7 +47,7 @@ def main(
     rank, world_size,
     initializing,amp,batch_size,epoch_num,lr,
     resume,datadir,SavedDir,log,CheckpointDir,
-    image_size,diff_step,patch_size,embed_dim,depth,head):
+    image_size,sigma1,patch_size,embed_dim,depth,head):
 
     loss_rec = 5.0
     steps = 0
@@ -54,8 +55,8 @@ def main(
 
     init_process_group(world_size, rank)
        
-    train_set = DiffusionDataset(datadir[0],imgSize=image_size,max_step=diff_step)
-    test_set = DiffusionDataset(datadir[1],imgSize=image_size,max_step=diff_step)
+    train_set = BFNDataset(datadir[0],imgSize=image_size,sigma1=sigma1)
+    test_set = BFNDataset(datadir[1],imgSize=image_size,sigma1=sigma1)
     train_sampler = DistributedSampler(train_set,world_size,rank,True,seed=42,drop_last=True)
     test_sampler = DistributedSampler(test_set,world_size,rank,False,drop_last=False)
     train_dataloader = DataLoader(train_set,batch_size=batch_size,sampler=train_sampler,num_workers=8)
@@ -64,7 +65,7 @@ def main(
     test_batchs = len(test_dataloader)
     device = torch.device('cuda:{:d}'.format(rank))
     torch.cuda.set_device(device)
-    model = DiffusionVisionTransformer(img_size=image_size,patch_size=patch_size,embed_dim=embed_dim,depth=depth,num_heads=head)
+    model = BFNVisionTransformer(img_size=image_size,patch_size=patch_size,embed_dim=embed_dim,depth=depth,num_heads=head)
     model = torch.nn.SyncBatchNorm.convert_sync_batchnorm(model).to(device)
     if rank == 0 and not(os.path.isfile(SavedDir+initializing)):
         torch.save(model.state_dict(),SavedDir+initializing)
@@ -84,7 +85,7 @@ def main(
             
     # Assume the GPU ID to be the same as the process ID
     model = DDP(model, device_ids=[device], output_device=device)
-    optimizer = torch.optim.AdamW(model.parameters(), lr=lr,weight_decay=0.05)
+    optimizer = torch.optim.AdamW(model.parameters(), lr=lr,weight_decay=0.01,betas=(0.9,0.99))
     scaler = torch.cuda.amp.GradScaler(enabled=amp)
     #scheduler = torch.optim.lr_scheduler.OneCycleLR(optimizer, lr, epochs=epoch_num[1], steps_per_epoch=train_batchs, pct_start=5/epoch_num[1],div_factor=1e4,cycle_momentum=False)
     scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(optimizer,train_batchs*epoch_num[1],0.0,verbose=False)
@@ -110,15 +111,15 @@ def main(
         train_sampler.set_epoch(epoch)
         train_generator = iter(train_dataloader)
         for _ in range(len(train_dataloader)):
-            noisy_img,img,t = next(train_generator)
+            noisy_img,img,t,gamma = next(train_generator)
             noisy_img = noisy_img.to(device)
             img = img.to(device)
-            t = t.to(device)
-
+            t = t.float().to(device)
+            gamma = gamma.float().to(device)
             with torch.cuda.amp.autocast(enabled=amp):
-                denoised_img = model(noisy_img,t)
-                loss = F.smooth_l1_loss(denoised_img,img)
-            print(loss)
+                denoised_img = model(noisy_img,t,gamma)
+                loss = BFNLoss(img,denoised_img,t,sigma1) #F.smooth_l1_loss(denoised_img,img)
+            # print(loss)
             loss_rec = loss_rec*0.99+loss.item()*0.01
             optimizer.zero_grad(set_to_none=False)
             scaler.scale(loss).backward()
@@ -128,22 +129,23 @@ def main(
             scaler.update()
             steps += 1
             scheduler.step()
-            if steps % 100 == 0 and rank == 0:
-                time_end=time.time()
-                printLog(f'steps: {steps:8d} loss: {loss_rec:.4f} time_cost: {time_end-time_start:.2f}',log) 
-                time_start=time.time()
+            if steps % 30 == 0 and rank == 0:
+                printLog(f'steps: {steps:8d} loss: {loss_rec:.4f}',log) 
+                
         del noisy_img,img,t,loss
         
         test_sampler.set_epoch(epoch)
-        vloss = evaluate(model,test_dataloader,device)#gamma_array[epoch])
+        vloss = evaluate(model,sigma1,test_dataloader,device)#gamma_array[epoch])
         vloss =  torch.tensor(vloss,device=device)
         dist.all_reduce(vloss, op=dist.ReduceOp.SUM)
         vloss /= torch.distributed.get_world_size()
         vloss = vloss.cpu().numpy()
         #scheduler.step(vloss)
         if rank == 0:
+            time_end=time.time()
             #print(np.around(val_hist).astype(np.int32))
-            printLog(f'epoch: {epoch:4d}    loss: {vloss:.5f}    time:{time.asctime(time.localtime(time.time()))}',log) 
+            printLog(f'epoch: {epoch:4d}    loss: {vloss:.5f}    time_cost:{time_end-time_start:.2f}',log) 
+            time_start=time.time()
             if vloss<best_loss:
                 best_loss = vloss
                 torch.save(model.module.state_dict(),CheckpointDir+"bestloss.pkl")
@@ -166,7 +168,7 @@ if __name__ == '__main__':
     current_path = os.path.dirname(os.path.abspath(__file__))
     sys.path.append(current_path)
     ExpName = sys.argv[1]
-    #ExpName = '20220822'
+    #ExpName = '20231108_L'
     with open(current_path+'/'+ExpName+'.yaml') as f:
         training_parameters = yaml.full_load(f)
 
@@ -197,7 +199,7 @@ if __name__ == '__main__':
     log=SavedDir+ExpName+modelName+"/train.log"
     
     image_size = training_parameters["image_size"]
-    diff_step = training_parameters["diff_step"] 
+    sigma1 = training_parameters["sigma1"] 
     patch_size = training_parameters["patch_size"] 
     embed_dim = training_parameters["embed_dim"] 
     depth = training_parameters["depth"] 
@@ -206,7 +208,7 @@ if __name__ == '__main__':
     torch.multiprocessing.set_start_method('spawn')
     procs = []
     for rank in range(num_gpus):
-        p = mp.Process(target=main, args=(rank,num_gpus,initializing,amp,batch_size,epoch_num,lr,resume,TrainDir,SavedDir,log,CheckpointDir,image_size,diff_step,patch_size,embed_dim,depth,head))
+        p = mp.Process(target=main, args=(rank,num_gpus,initializing,amp,batch_size,epoch_num,lr,resume,TrainDir,SavedDir,log,CheckpointDir,image_size,sigma1,patch_size,embed_dim,depth,head))
         p.start()
         procs.append(p)
     for p in procs:
