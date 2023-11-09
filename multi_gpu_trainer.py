@@ -39,7 +39,8 @@ def evaluate(model,sigma1, dataloader, device):
         gamma = gamma.float().to(device)
         with torch.no_grad():
             denoised_img = model(noisy_img,t,gamma)
-            loss = BFNLoss(img,denoised_img,t,sigma1)
+            loss = F.smooth_l1_loss(denoised_img,img)
+            # loss = BFNLoss(img,denoised_img,t,sigma1)
         loss_arr.append(loss.item())
     return np.array(loss_arr).mean()
 
@@ -65,7 +66,7 @@ def main(
     test_batchs = len(test_dataloader)
     device = torch.device('cuda:{:d}'.format(rank))
     torch.cuda.set_device(device)
-    model = BFNVisionTransformer(img_size=image_size,patch_size=patch_size,embed_dim=embed_dim,depth=depth,num_heads=head)
+    model = BFNVisionTransformer(img_size=image_size,patch_size=patch_size,embed_dim=embed_dim,depth=depth,num_heads=head,sigma1=sigma1)
     model = torch.nn.SyncBatchNorm.convert_sync_batchnorm(model).to(device)
     if rank == 0 and not(os.path.isfile(SavedDir+initializing)):
         torch.save(model.state_dict(),SavedDir+initializing)

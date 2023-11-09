@@ -249,21 +249,38 @@ class BFNVisionTransformer(nn.Module):
 
     @torch.no_grad()
     def sampler(self,device,k=25,N=128):
+            # #debug
+        import matplotlib.pyplot as plt
+        import torchvision.transforms.functional as transF
 
         alpha = self.sigma1**(-2/k)*(1-self.sigma1**(2/k))
-        y = torch.normal(0,1/alpha,(N,3,self.img_size[0],self.img_size[1]),device=device)
+        y = torch.normal(0,1/alpha**0.5,(N,3,self.img_size[0],self.img_size[1]),device=device)
         mu = alpha*y/(1+alpha)  
         rho = 1+alpha
         pred = torch.zeros((N,3,self.img_size[0],self.img_size[1]),device=device)    
+
+        # out = (mu.clip(-1,1).cpu()[0]+1)/2
+        # out = transF.to_pil_image(out)
+        # plt.imshow(out)
+        # plt.savefig('/home/jiayinjun/Bayesian_Flow_Networks/tmp/debug_sampler.png')
+
         for i in tqdm(range(2,k,1)):
             t = (i-1)/k*torch.ones(N,device=device)
-            pred = self.forward(pred,t,1-self.sigma1**(2*t))
+            pred = self.forward(mu,t,1-self.sigma1**(2*t))
+            # #debug
+            # out = (mu.clip(-1,1).cpu()[0]+1)/2
+            # out = transF.to_pil_image(out)
+            # plt.imshow(out)
+            # plt.savefig('/home/jiayinjun/Bayesian_Flow_Networks/tmp/debug_sampler.png')
+            # #
+            pred = torch.clip_(pred,-1,1)
             alpha = self.sigma1**(-2*i/k)*(1-self.sigma1**(2/k))
-            y = torch.normal(0,1/alpha,(N,3,self.img_size[0],self.img_size[1]),device=device)+pred
+            y = torch.normal(0,1/alpha**0.5,(N,3,self.img_size[0],self.img_size[1]),device=device)+pred
             mu = (rho*mu+alpha*y)/(rho+alpha)
             rho = rho+alpha
 
-        pred = self.forward(pred,1,1-self.sigma1**2)    
+        pred = self.forward(pred,torch.ones(N,device=device),(1-self.sigma1**2)*torch.ones(N,device=device))
+        pred = torch.clip_(pred,-1,1)
         img = (pred.cpu()+1)/2
         return img
 
