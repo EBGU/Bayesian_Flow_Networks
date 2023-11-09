@@ -1,0 +1,15 @@
+initializing : 'vit_96_4_384_12_12.pkl' #
+resume: 'none'
+AMP : False 
+framework : 'vit_tiny_diffusion'
+num_gpus : 1
+batch_size : 128
+epoch : [0,200]
+base_lr : 0.005 # per 512
+dataStorage : ["/drug/OxfordFlowers/train","/drug/OxfordFlowers/val"]
+image_size : [96,96]
+sigma1 : 0.001
+patch_size : 4
+embed_dim : 384
+depth : 12
+head : 12
