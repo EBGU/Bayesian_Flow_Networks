@@ -4,9 +4,9 @@ AMP : False
 framework : 'vit_tiny_diffusion'
 num_gpus : 1
 batch_size : 128
-epoch : [0,500]
-base_lr : 0.001 # per 512
-dataStorage : ["/drug/OxfordFlowers/train","/drug/OxfordFlowers/val"]
+epoch : [0,100]
+base_lr : 0.0005 # per 512
+dataStorage : ["/data/protein/OxfordFlowers/train","/data/protein/OxfordFlowers/val"]
 image_size : [64,64]
 sigma1 : 0.001
 patch_size : 8

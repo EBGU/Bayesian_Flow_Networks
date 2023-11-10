@@ -2,7 +2,7 @@ import os,sys
 get_path = os.path.dirname(os.path.abspath(__file__))
 sys.path.append(get_path)
 from bfn_loader import BFNDataset
-from ViT import BFNLoss,BFNVisionTransformer
+from ViT import BFNLoss,BFN_U_Vit
 import numpy as np
 import torch
 import torch.distributed as dist
@@ -32,15 +32,16 @@ def evaluate(model,sigma1, dataloader, device):
     datagenerator = iter(dataloader)
     loss_arr = []
     for _ in range(len(dataloader)):
-        noisy_img,img,t,gamma = next(datagenerator)
+        noisy_img,img,t,gamma,labels = next(datagenerator)
         noisy_img = noisy_img.to(device)
         img = img.to(device)
         t = t.float().to(device)
         gamma = gamma.float().to(device)
+        labels = labels.long().to(device)
         with torch.no_grad():
-            denoised_img = model(noisy_img,t,gamma)
-            loss = F.smooth_l1_loss(denoised_img,img)
-            # loss = BFNLoss(img,denoised_img,t,sigma1)
+            denoised_img = model(noisy_img,t,gamma,labels)
+            #loss = F.smooth_l1_loss(denoised_img,img)
+            loss = BFNLoss(img,denoised_img,t,sigma1)
         loss_arr.append(loss.item())
     return np.array(loss_arr).mean()
 
@@ -50,23 +51,23 @@ def main(
     resume,datadir,SavedDir,log,CheckpointDir,
     image_size,sigma1,patch_size,embed_dim,depth,head):
 
-    loss_rec = 5.0
+    loss_rec = 15.0
     steps = 0
-    best_loss = 5.0
+    best_loss = 15.0
 
     init_process_group(world_size, rank)
        
-    train_set = BFNDataset(datadir[0],imgSize=image_size,sigma1=sigma1)
-    test_set = BFNDataset(datadir[1],imgSize=image_size,sigma1=sigma1)
+    train_set = BFNDataset(datadir[0],imgSize=image_size,sigma1=sigma1,labels=datadir[2])
+    test_set = BFNDataset(datadir[1],imgSize=image_size,sigma1=sigma1,labels=datadir[2])
     train_sampler = DistributedSampler(train_set,world_size,rank,True,seed=42,drop_last=True)
     test_sampler = DistributedSampler(test_set,world_size,rank,False,drop_last=False)
     train_dataloader = DataLoader(train_set,batch_size=batch_size,sampler=train_sampler,num_workers=8)
     test_dataloader = DataLoader(test_set,batch_size=batch_size,sampler=test_sampler,num_workers=8)
     train_batchs = len(train_dataloader)
     test_batchs = len(test_dataloader)
-    device = torch.device('cuda:{:d}'.format(rank))
+    device = torch.device('cuda:{:d}'.format(rank+1))
     torch.cuda.set_device(device)
-    model = BFNVisionTransformer(img_size=image_size,patch_size=patch_size,embed_dim=embed_dim,depth=depth,num_heads=head,sigma1=sigma1)
+    model = BFN_U_Vit(img_size=image_size,patch_size=patch_size,embed_dim=embed_dim,depth=depth,num_heads=head,sigma1=sigma1,cat_num=train_set.cat_num)
     model = torch.nn.SyncBatchNorm.convert_sync_batchnorm(model).to(device)
     if rank == 0 and not(os.path.isfile(SavedDir+initializing)):
         torch.save(model.state_dict(),SavedDir+initializing)
@@ -112,13 +113,14 @@ def main(
         train_sampler.set_epoch(epoch)
         train_generator = iter(train_dataloader)
         for _ in range(len(train_dataloader)):
-            noisy_img,img,t,gamma = next(train_generator)
+            noisy_img,img,t,gamma,labels = next(train_generator)
             noisy_img = noisy_img.to(device)
             img = img.to(device)
             t = t.float().to(device)
             gamma = gamma.float().to(device)
+            labels = labels.long().to(device)
             with torch.cuda.amp.autocast(enabled=amp):
-                denoised_img = model(noisy_img,t,gamma)
+                denoised_img = model(noisy_img,t,gamma,labels)
                 loss = BFNLoss(img,denoised_img,t,sigma1) #F.smooth_l1_loss(denoised_img,img)
             # print(loss)
             loss_rec = loss_rec*0.99+loss.item()*0.01

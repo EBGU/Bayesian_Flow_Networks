@@ -228,13 +228,13 @@ class BFNVisionTransformer(nn.Module):
         cls_tokens = self.cls_token.expand(B, -1, -1)
         x = torch.cat((cls_tokens, x), dim=1)
         time_step = self.time_embed(steps).unsqueeze_(1)
-        x = x + self.pos_embed + time_step
-        return self.pos_drop(x)
+        x = x + self.pos_embed 
+        return self.pos_drop(x), time_step
 
     def forward(self,x,t,gamma,CTS_out=True):
-        x1 = self.prepare_tokens(x,t)
+        x1,time_step = self.prepare_tokens(x,t)
         for i,blk in enumerate(self.blocks):
-            x1 = blk(x1)
+            x1 = blk(x1+time_step)
         x1 = self.norm(x1)
         x1 = self.head(x1)
         img = x1[:,1:,:]
@@ -257,18 +257,164 @@ class BFNVisionTransformer(nn.Module):
         y = torch.normal(0,1/alpha**0.5,(N,3,self.img_size[0],self.img_size[1]),device=device)
         mu = alpha*y/(1+alpha)  
         rho = 1+alpha
-        pred = torch.zeros((N,3,self.img_size[0],self.img_size[1]),device=device)    
 
         # out = (mu.clip(-1,1).cpu()[0]+1)/2
         # out = transF.to_pil_image(out)
         # plt.imshow(out)
         # plt.savefig('/home/jiayinjun/Bayesian_Flow_Networks/tmp/debug_sampler.png')
 
-        for i in tqdm(range(2,k,1)):
+        for i in tqdm(range(2,k+1,1)):
             t = (i-1)/k*torch.ones(N,device=device)
             pred = self.forward(mu,t,1-self.sigma1**(2*t))
             # #debug
-            # out = (mu.clip(-1,1).cpu()[0]+1)/2
+            # out = (pred.clip(-1,1).cpu()[0]+1)/2
+            # out = transF.to_pil_image(out)
+            # plt.imshow(out)
+            # plt.savefig('/home/jiayinjun/Bayesian_Flow_Networks/tmp/debug_sampler.png')
+            # #
+            pred = torch.clip_(pred,-1,1)
+            alpha = self.sigma1**(-2*i/k)*(1-self.sigma1**(2/k))
+            y = torch.normal(0,1/alpha**0.5,(N,3,self.img_size[0],self.img_size[1]),device=device)+pred
+            mu = (rho*mu+alpha*y)/(rho+alpha)
+            rho = rho+alpha
+
+        pred = self.forward(mu,torch.ones(N,device=device),(1-self.sigma1**2)*torch.ones(N,device=device))
+        pred = torch.clip_(pred,-1,1)
+        img = (pred.cpu()+1)/2
+        return img
+
+class resblock(nn.Module):
+
+    def __init__(
+        self,
+        in_channel=256,
+        hidden=512,
+        out_channel = 3
+    ) -> None:
+        super().__init__()
+        self.conv1 = nn.Conv2d(in_channel,hidden,1)
+        self.norm1 = nn.LayerNorm(hidden)
+        self.conv2 = nn.Conv2d(hidden,hidden,3,padding=1,padding_mode='replicate')
+        self.norm2 = nn.LayerNorm(hidden)
+        self.conv3 = nn.Conv2d(hidden,out_channel,1)
+
+    def forward(self, x):
+
+        out = self.conv1(x)
+        out = out.permute(0,2,3,1).contiguous() # N C W H -> N W H C
+        out = self.norm1(out)
+        out = F.gelu(out)
+        out = out.permute(0,3,1,2).contiguous()  # N W H C -> N C W H
+        out = self.conv2(out)
+        out = out.permute(0,2,3,1).contiguous()
+        out = self.norm2(out)
+        out = F.gelu(out)
+        out = out.permute(0,3,1,2).contiguous()
+        out = self.conv3(out)
+
+        return out
+
+class BFN_U_Vit(nn.Module):
+    """ Vision Transformer """
+    def __init__(self, img_size=[64,64], patch_size=4, in_chans=3, embed_dim=384, depth=7,
+                 num_heads=4, mlp_ratio=1., qkv_bias=True, qk_scale=None, drop_rate=0.1, attn_drop_rate=0.1,
+                 drop_path_rate=0.1, norm_layer=nn.LayerNorm,emb=PatchEmbed,sigma1 = 0.001,cat_num=102, **kwargs):
+        super().__init__()
+        assert depth % 2 == 1, "U-Vit has to have odd layer number!"
+        assert embed_dim % patch_size**2 == 0, 'Embed dim should be exactly divided by patch size square'
+        self.depth = depth
+        self.num_features = self.embed_dim = embed_dim
+        self.patch_size = patch_size
+        self.in_chans = in_chans
+        self.img_size = img_size
+        self.sigma1 = sigma1
+        self.patch_embed = emb(
+            img_size=img_size, patch_size=patch_size, in_chans=in_chans, embed_dim=embed_dim)
+        num_patches = self.patch_embed.num_patches
+        self.time_embed = RBFExpansion(num_centers=embed_dim)
+        self.pos_embed = nn.Parameter(torch.zeros(1, num_patches + 2, embed_dim))
+        self.pos_drop = nn.Dropout(p=drop_rate)
+        dpr = [x.item() for x in torch.linspace(0, drop_path_rate, depth)]  # stochastic depth decay rule
+        self.blocks = nn.ModuleList([
+            Block(
+                dim=embed_dim, num_heads=num_heads, mlp_ratio=mlp_ratio, qkv_bias=qkv_bias, qk_scale=qk_scale,
+                drop=drop_rate, attn_drop=attn_drop_rate, drop_path=dpr[i], norm_layer=norm_layer)
+            for i in range(depth)])
+        self.skip_connection =  nn.ModuleList([
+            nn.Linear(2*embed_dim,embed_dim)
+            for i in range(depth//2)
+        ])
+        self.norm = norm_layer(embed_dim)
+        self.head = resblock(in_channel=embed_dim//patch_size**2,hidden=embed_dim,out_channel=in_chans) 
+        self.class_emb = nn.Embedding(cat_num+1,embed_dim)
+        self.cat_num = cat_num
+        trunc_normal_(self.pos_embed, std=.02)
+        trunc_normal_(self.class_emb.weight, std=.02)
+        trunc_normal_(self.time_embed.linear.weight, std=.02)
+        nn.init.constant_(self.time_embed.linear.bias, 0)
+        self.apply(self._init_weights)
+
+    def _init_weights(self, m):
+        if isinstance(m, nn.Linear):
+            trunc_normal_(m.weight, std=.02)
+            if isinstance(m, nn.Linear) and m.bias is not None:
+                nn.init.constant_(m.bias, 0)
+        elif isinstance(m, nn.LayerNorm):
+            nn.init.constant_(m.bias, 0)
+            nn.init.constant_(m.weight, 1.0)
+
+
+    def prepare_tokens(self, x,steps,labels):
+        B, nc, w, h = x.shape
+        x = self.patch_embed(x)  # patch linear embedding
+        #cls_tokens = self.cls_token.expand(B, -1, -1)
+        time_step = self.time_embed(steps).unsqueeze_(1)
+        class_token = self.class_emb(labels).unsqueeze_(1)
+        x = torch.cat((class_token,time_step, x), dim=1)
+        x = x + self.pos_embed 
+        return self.pos_drop(x)
+
+    def forward(self,x,t,gamma,labels):
+        x1 = self.prepare_tokens(x,t,labels)
+        intermidiate = []
+        for i,blk in enumerate(self.blocks):
+            if  i > (self.depth-1)//2:
+                x1 = self.skip_connection[self.depth-1-i](torch.cat([intermidiate[self.depth-1-i],x1],-1))
+            x1 = blk(x1)
+            if i < (self.depth-1)//2:
+                intermidiate.append(x1)
+        x1 = self.norm(x1)
+        img = x1[:,2:,:]
+        img = img.view(-1,self.img_size[0]//self.patch_size,self.img_size[1]//self.patch_size,self.patch_size,self.patch_size,self.embed_dim // self.patch_size**2)
+        img = img.permute(0, 5, 1, 3, 2, 4).contiguous()
+        img = img.view(-1,self.embed_dim // self.patch_size**2,self.img_size[0],self.img_size[1])
+        img = self.head(img)
+
+        gamma = gamma.view(-1,1,1,1)
+        img = x/gamma - torch.sqrt((1-gamma)/gamma)*img
+        return img
+
+    @torch.no_grad()
+    def sampler(self,device,k=25,N=128):
+            # #debug
+        # import matplotlib.pyplot as plt
+        # import torchvision.transforms.functional as transF
+        labels = torch.randint(1,self.cat_num+1,N).long().to(device)
+        alpha = self.sigma1**(-2/k)*(1-self.sigma1**(2/k))
+        y = torch.normal(0,1/alpha**0.5,(N,3,self.img_size[0],self.img_size[1]),device=device)
+        mu = alpha*y/(1+alpha)  
+        rho = 1+alpha
+
+        # out = (mu.clip(-1,1).cpu()[0]+1)/2
+        # out = transF.to_pil_image(out)
+        # plt.imshow(out)
+        # plt.savefig('/home/jiayinjun/Bayesian_Flow_Networks/tmp/debug_sampler.png')
+
+        for i in tqdm(range(2,k+1,1)):
+            t = (i-1)/k*torch.ones(N,device=device)
+            pred = self.forward(mu,t,1-self.sigma1**(2*t),labels)
+            # #debug
+            # out = (pred.clip(-1,1).cpu()[0]+1)/2
             # out = transF.to_pil_image(out)
             # plt.imshow(out)
             # plt.savefig('/home/jiayinjun/Bayesian_Flow_Networks/tmp/debug_sampler.png')
@@ -285,6 +431,7 @@ class BFNVisionTransformer(nn.Module):
         return img
 
 
+
 def BFNLoss(img,pred,t,sigma1=0.001):
     loss =torch.mean(-math.log(sigma1)*sigma1**(-2*t)*((img-pred)**2).mean(dim=(-1,-2,-3)))
     return loss
@@ -292,11 +439,12 @@ def BFNLoss(img,pred,t,sigma1=0.001):
 if __name__ == '__main__':
     from bfn_loader import BFNDataset
     from torch.utils.data import DataLoader
-    dataset = BFNDataset("/drug/OxfordFlowers/train",[64,64],sigma1=0.001)
-    dataloader = DataLoader(dataset,batch_size=4)
-    noisy_img,img,t,gamma = next(iter(dataloader))
+    dataset = BFNDataset("/data/protein/OxfordFlowers/train",[64,64],sigma1=0.001)
+    dataloader = DataLoader(dataset,batch_size=4,shuffle=True)
+    noisy_img,img,t,gamma,labels = next(iter(dataloader))
     t = t.float()
     gamma = gamma.float()
-    model = BFNVisionTransformer()
-    out = model(noisy_img,t,gamma)
+    labels = labels.long()
+    model = BFN_U_Vit()
+    out = model(noisy_img,t,gamma,labels)
     

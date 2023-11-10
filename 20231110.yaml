@@ -1,15 +1,15 @@
-initializing : 'vit_96_4_384_12_12.pkl' #
+initializing : 'uvit_96_4_384_13_12.pkl' #
 resume: 'none'
 AMP : False 
-framework : 'vit_tiny_diffusion'
-num_gpus : 1
-batch_size : 128
+framework : 'uvit_bfn'
+num_gpus : 2
+batch_size : 64
 epoch : [0,500]
 base_lr : 0.001 # per 512
 dataStorage : ["/data/protein/OxfordFlowers/train","/data/protein/OxfordFlowers/val"]
 image_size : [96,96]
 sigma1 : 0.001
 patch_size : 4
-embed_dim : 384
-depth : 12
-head : 12
+embed_dim : 512
+depth : 13
+head : 16
