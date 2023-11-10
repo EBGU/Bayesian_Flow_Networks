@@ -43,7 +43,7 @@ class BFNDataset(Dataset):
         filename = self.imgList[int(index)]
         if random.random() > 0: #1/self.cat_num: #mask some label
             label = int(filename.split('.')[0].split('_')[1])
-            label = self.labels[label]
+            label = self.labels[label-1]
         else:
             label = 0 #label always from 1
         path = os.path.join(self.root,filename)
