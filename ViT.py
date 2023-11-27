@@ -395,11 +395,14 @@ class BFN_U_Vit(nn.Module):
         return img
 
     @torch.no_grad()
-    def sampler(self,device,k=25,N=128):
+    def sampler(self,device,k=25,N=128,imgclass=0):
             # #debug
         # import matplotlib.pyplot as plt
         # import torchvision.transforms.functional as transF
-        labels = torch.randint(1,self.cat_num+1,N).long().to(device)
+        if imgclass == 0:
+            labels = torch.randint(1,self.cat_num+1,(N,)).long().to(device)
+        else:
+            labels = imgclass*torch.ones(N).long().to(device)
         alpha = self.sigma1**(-2/k)*(1-self.sigma1**(2/k))
         y = torch.normal(0,1/alpha**0.5,(N,3,self.img_size[0],self.img_size[1]),device=device)
         mu = alpha*y/(1+alpha)  
@@ -425,10 +428,10 @@ class BFN_U_Vit(nn.Module):
             mu = (rho*mu+alpha*y)/(rho+alpha)
             rho = rho+alpha
 
-        pred = self.forward(pred,torch.ones(N,device=device),(1-self.sigma1**2)*torch.ones(N,device=device))
+        pred = self.forward(pred,torch.ones(N,device=device),(1-self.sigma1**2)*torch.ones(N,device=device),labels)
         pred = torch.clip_(pred,-1,1)
         img = (pred.cpu()+1)/2
-        return img
+        return img,labels.cpu().numpy()
 
 
 

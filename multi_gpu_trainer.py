@@ -65,7 +65,7 @@ def main(
     test_dataloader = DataLoader(test_set,batch_size=batch_size,sampler=test_sampler,num_workers=8)
     train_batchs = len(train_dataloader)
     test_batchs = len(test_dataloader)
-    device = torch.device('cuda:{:d}'.format(rank+1))
+    device = torch.device('cuda:{:d}'.format(rank))
     torch.cuda.set_device(device)
     model = BFN_U_Vit(img_size=image_size,patch_size=patch_size,embed_dim=embed_dim,depth=depth,num_heads=head,sigma1=sigma1,cat_num=train_set.cat_num)
     model = torch.nn.SyncBatchNorm.convert_sync_batchnorm(model).to(device)
