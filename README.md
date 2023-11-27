@@ -1,5 +1,5 @@
 # Denoising_Diffusion_Implicit_Models
-A replication of Denoising Diffusion Implicit Models paper with PyTorch and [ViT](https://github.com/facebookresearch/dino).
+A replication of Denoising Diffusion Implicit Models paper with PyTorch and [U-ViT](https://arxiv.org/pdf/2209.12152.pdf).
 
 ![img](https://github.com/EBGU/Denoising_Diffusion_Implicit_Models/blob/main/Saved_Models/samples_flower.png)
 
@@ -7,24 +7,27 @@ A replication of Denoising Diffusion Implicit Models paper with PyTorch and [ViT
 
 To train a new model, you can modify the yaml file and:
 
-` python multi_gpu_trainer.py 20220822 `
+` python multi_gpu_trainer.py example `
 
 Or you can download my pretrained weights for [Oxford Flowers](https://www.robots.ox.ac.uk/~vgg/data/flowers/) and run inference:
 
-` python ViT.py `
+` python sample_img.py `
 
-The inference process is controled by 3 parameters (DiffusionVisionTransformer.sampler):
+The inference process is controled by 6 parameters :
 
 "device", usually `torch.device('cuda')` ;
 
-"k", because the sampling become deterministic with [DDIM](https://arxiv.org/abs/2010.02502), we can jump k steps for faster speed;
+"load", best epoch or last epoch;
 
-"N", how many samples you will get.
+"SavedDir", where to save images;
+
+"ExpDir", the yaml file of your experiments;
+
+"n_sqrt", N**2 how many samples you will get;
+
+"steps", n steps for sampling, the orignal paper recommands 25, but in my experiment, 200 is better.
 
 The result should looks like the welcoming images.
 
-If you want my pretrained weights for miniImageNet, please leave you email address. Enjoy!
+Enjoy!
 
-### 20220829
-Upload checkpoints for high-resolution images(200*200), and add new code for [zero-shot draft-to-drawings](https://github.com/EBGU/Denoising_Diffusion_Implicit_Models/blob/main/ViT_draft2drawing.py).
-![img](https://github.com/EBGU/Denoising_Diffusion_Implicit_Models/blob/main/Saved_Models/d2d_sample.jpg)
