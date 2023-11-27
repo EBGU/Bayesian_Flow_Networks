@@ -1,3 +1,0 @@
-python multi_gpu_trainer.py 20231108_L
-wait
-python multi_gpu_trainer.py 20231108
