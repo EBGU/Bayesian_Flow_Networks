@@ -10,9 +10,11 @@ To train a new model, you can modify the yaml file and:
 
 ` python multi_gpu_trainer.py example `
 
-Or you can download my pretrained weights for [Oxford Flowers](https://www.robots.ox.ac.uk/~vgg/data/flowers/) and run inference:
+Training data of [Oxford Flowers](https://www.robots.ox.ac.uk/~vgg/data/flowers/) should be split manually, and you can find the numpy version of their labels in this repo.
 
-` python sample_img.py `
+To run inference:
+
+` python sample_img.py --device "cuda:0" --load "last" --SavedDir tmp/ --ExpConfig example/example.yaml --n_sqrt 8 --steps 200 `
 
 The inference process is controled by 6 parameters :
 
@@ -22,9 +24,9 @@ The inference process is controled by 6 parameters :
 
 "SavedDir", where to save images;
 
-"ExpDir", the yaml file of your experiments;
+"ExpConfig", the yaml file of your experiments;
 
-"n_sqrt", N**2 how many samples you will get;
+"n_sqrt", you will get N<sup>2</sup> samples for each class;
 
 "steps", n steps for sampling, the orignal paper recommands 25, but in my experiment, 200 is better.
 
