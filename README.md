@@ -1,5 +1,5 @@
-# Denoising_Diffusion_Implicit_Models
-A replication of Denoising Diffusion Implicit Models paper with PyTorch and [U-ViT](https://arxiv.org/pdf/2209.12152.pdf).
+# Bayesian_Flow_Networks
+A replication of [Bayesian_Flow_Networks](https://arxiv.org/abs/2308.07037) paper with PyTorch and [U-ViT](https://arxiv.org/pdf/2209.12152.pdf).
 
 | ![samples_10](images/samples_10.png) | ![samples_41](images/samples_41.png) | ![samples_49](images/samples_49.png) |
 | ------------------------------------ | ------------------------------------ | ------------------------------------ |

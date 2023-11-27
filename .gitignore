@@ -10,7 +10,7 @@ __pycache__/
 debug*
 # C extensions
 *.so
-
+2023*
 # Distribution / packaging
 .Python
 build/
