@@ -52,7 +52,10 @@ class BFNDataset(Dataset):
         img = F.resize(img,(self.width,self.height),antialias=False)
         img = img*2 -1 #[xmin, xmax] = [−1, 1]
         if t is None:
-            t = np.random.rand()*(1-self.tmin)+self.tmin
+            if np.random.rand() > 0.5/-math.log(self.sigma1):
+                t = np.random.rand()*(1-self.tmin)+self.tmin
+            else:
+                t = 1
         gamma = 1-self.sigma1**(2*t)
         noise = torch.normal(0,math.sqrt(gamma*(1-gamma)),img.shape)
         noisy_img = gamma*img+noise
