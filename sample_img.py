@@ -63,7 +63,7 @@ if __name__ == "__main__":
     model.eval()
     img_size = model.img_size
 
-    for imageclass in range(10):
+    for imageclass in range(102):
         img,labels = model.sampler(device,steps,n_sqrt**2,imageclass+1)
         fig = plt.figure(figsize=img_size)
         grid = ImageGrid(fig, 111,  # similar to subplot(111)
